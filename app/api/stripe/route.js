@@ -2,11 +2,10 @@ import prisma from "@/lib/prisma";
 import { NextResponse } from "next/server";
 
 export const config = {
-  api: { bodyparser: false }
+  api: { bodyparser: false },
 };
 
-export async function POST(request: Request) {
-  // If Stripe is not configured, disable the route gracefully
+export async function POST(request) {
   if (!process.env.STRIPE_SECRET_KEY || !process.env.STRIPE_WEBHOOK_SECRET) {
     return NextResponse.json(
       { error: "Stripe disabled (missing keys)" },
@@ -14,14 +13,12 @@ export async function POST(request: Request) {
     );
   }
 
-  // Dynamically import and initialize Stripe only when keys exist
   const Stripe = (await import("stripe")).default;
-  const stripe = new Stripe(process.env.STRIPE_SECRET_KEY as string);
+  const stripe = new Stripe(process.env.STRIPE_SECRET_KEY);
 
   try {
     const body = await request.text();
     const sig = request.headers.get("stripe-signature");
-
     if (!sig) {
       return NextResponse.json({ error: "Missing signature" }, { status: 400 });
     }
@@ -29,19 +26,17 @@ export async function POST(request: Request) {
     const event = stripe.webhooks.constructEvent(
       body,
       sig,
-      process.env.STRIPE_WEBHOOK_SECRET as string
+      process.env.STRIPE_WEBHOOK_SECRET
     );
 
-    const handlePaymentIntent = async (paymentIntentId: string, isPaid: boolean) => {
+    const handlePaymentIntent = async (paymentIntentId, isPaid) => {
       const session = await stripe.checkout.sessions.list({
-        payment_intent: paymentIntentId
+        payment_intent: paymentIntentId,
       });
 
-      const meta = session.data?.[0]?.metadata as
-        | { orderIds?: string; userId?: string; appId?: string }
-        | undefined;
-
-      if (!meta?.orderIds || !meta?.userId || meta?.appId !== "gocart") {
+      const first = session.data && session.data[0];
+      const meta = first && first.metadata;
+      if (!meta || meta.appId !== "gocart" || !meta.orderIds || !meta.userId) {
         return NextResponse.json({ received: true, message: "Invalid metadata" });
       }
 
@@ -52,20 +47,19 @@ export async function POST(request: Request) {
           orderIdsArray.map((orderId) =>
             prisma.order.update({
               where: { id: orderId },
-              data: { isPaid: true }
+              data: { isPaid: true },
             })
           )
         );
-
         await prisma.user.update({
           where: { id: meta.userId },
-          data: { cart: {} }
+          data: { cart: {} },
         });
       } else {
         await Promise.all(
           orderIdsArray.map((orderId) =>
             prisma.order.delete({
-              where: { id: orderId }
+              where: { id: orderId },
             })
           )
         );
@@ -74,20 +68,19 @@ export async function POST(request: Request) {
 
     switch (event.type) {
       case "payment_intent.succeeded": {
-        await handlePaymentIntent((event.data.object as any).id, true);
+        await handlePaymentIntent(event.data.object.id, true);
         break;
       }
       case "payment_intent.canceled": {
-        await handlePaymentIntent((event.data.object as any).id, false);
+        await handlePaymentIntent(event.data.object.id, false);
         break;
       }
       default:
         console.log("Unhandled event type:", event.type);
-        break;
     }
 
     return NextResponse.json({ received: true });
-  } catch (error: any) {
+  } catch (error) {
     console.error(error);
     return NextResponse.json({ error: error.message }, { status: 400 });
   }
